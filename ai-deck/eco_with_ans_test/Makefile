@@ -1,0 +1,80 @@
+APP = test
+
+APP_SRCS = e4a_collision.c
+APP_SRCS += lib/ans/src/matrix_utils.c
+APP_SRCS += lib/ans/src/ans.c
+APP_SRCS += lib/cpx/src/cpx.c lib/cpx/src/com.c
+APP_SRCS += lib/camenc/src/camenc.c
+
+io=uart
+PMSIS_OS = freertos
+pulpChip = GAP
+PULP_APP = e4a_collision
+USE_PMSIS_BSP=1
+
+# Use JPEG ENCODER
+CONFIG_GAP_LIB_JPEG = 1
+
+
+CLUSTER_STACK_SIZE?=6096
+CLUSTER_SLAVE_STACK_SIZE?=1024
+TOTAL_STACK_SIZE=$(shell expr $(CLUSTER_STACK_SIZE) \+ $(CLUSTER_SLAVE_STACK_SIZE) \* 7)
+MODEL_L1_MEMORY=$(shell expr 60000 \- $(TOTAL_STACK_SIZE))
+MODEL_L2_MEMORY=250000
+MODEL_L3_MEMORY=8000000
+FREQ_CL=170 # max 170
+FREQ_FC=250
+
+
+CPX_TXQ_SIZE=5
+CPX_RXQ_SIZE=5
+
+# Model spec
+MODEL_SQ8=1
+QUANT_BITS=8
+MODEL_SUFFIX = _SQ8BIT
+MODEL_PREFIX = e4a_collision
+NNTOOL_SCRIPT=models/scripts/nntool_bourricot
+TRAINED_MODEL=models/BOURRICOT.onnx
+MODEL_L3_FLASH=AT_MEM_L3_HFLASH
+MODEL_L3_RAM=AT_MEM_L3_HRAM
+ONNX=1
+
+AT_CONSTRUCT = $(MODEL_PREFIX)CNN_Construct
+AT_DESTRUCT = $(MODEL_PREFIX)CNN_Destruct
+AT_CNN = $(MODEL_PREFIX)CNN
+AT_L3_ADDR = $(MODEL_PREFIX)_L3_Flash
+AT_INPUT_WIDTH=200
+AT_INPUT_HEIGHT=200
+
+include model_decl.mk
+
+APP_SRCS += $(MODEL_GEN_C) $(MODEL_COMMON_SRCS) $(CNN_LIB) $(MODEL_BUILD)/Expression_Kernels.c
+
+APP_CFLAGS += -g -O0 -mno-memcpy -fno-tree-loop-distribute-patterns
+# APP_CFLAGS += -g -Os -mno-memcpy -fno-tree-loop-distribute-patterns
+APP_CFLAGS += -lm -I. -DconfigUSE_TIMERS=1 -DINCLUDE_xTimerPendFunctionCall=1 -DFS_PARTITIONTABLE_OFFSET=0x40000 
+APP_CFLAGS += -I$(MODEL_COMMON_INC) -I$(TILER_EMU_INC) -I$(TILER_INC) $(CNN_LIB_INCLUDE) -I$(realpath $(MODEL_BUILD)) 
+APP_CFLAGS += -DSTACK_SIZE=$(CLUSTER_STACK_SIZE) -DSLAVE_STACK_SIZE=$(CLUSTER_SLAVE_STACK_SIZE)
+APP_CFLAGS +=  -DFREQ_FC=$(FREQ_FC) -DFREQ_CL=$(FREQ_CL) -DTXQ_SIZE=$(CPX_TXQ_SIZE) -DRXQ_SIZE=$(CPX_RXQ_SIZE) -DAIDECK
+APP_CFLAGS += -DAT_INPUT_WIDTH=$(AT_INPUT_WIDTH) -DAT_INPUT_HEIGHT=$(AT_INPUT_HEIGHT)
+APP_CFLAGS += -DAT_MODEL_PREFIX=$(MODEL_PREFIX) -DAT_CONSTRUCT=$(AT_CONSTRUCT) -DAT_DESTRUCT=$(AT_DESTRUCT) -DAT_CNN=$(AT_CNN) -DAT_L3_ADDR=$(AT_L3_ADDR)
+
+APP_LDFLAGS += -lm
+
+APP_INC += lib/ans/inc
+APP_INC += lib/cpx/inc
+APP_INC += lib/camenc/inc
+
+
+READFS_FILES=$(abspath $(MODEL_TENSORS))
+
+all:: model
+
+clean:: clean_model
+
+include model_rules.mk
+$(info APP_SRCS... $(APP_SRCS))
+$(info APP_CFLAGS... $(APP_CFLAGS))
+RUNNER_CONFIG = $(CURDIR)/config.ini
+include $(RULES_DIR)/pmsis_rules.mk

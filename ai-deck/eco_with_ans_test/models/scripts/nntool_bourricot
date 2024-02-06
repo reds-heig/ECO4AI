@@ -1,0 +1,41 @@
+set debug true
+# set log_level DEBUG
+
+# display graph
+show
+
+# restructure model to match autotiler generators
+adjust 
+
+# merge layer to be more efficient Conv+Pool+ReLU
+fusions --scale8 
+# fusions expression like div/mul/add/pow/sqrt/log
+fusions -a expression_matcher 
+
+# quantize model using image 200x200 pixel [-1:1]
+aquant calibration/fast/* -T -H 200 -W 200 --scheme SQ8 -D 128 -O -1 
+
+# allocate input in the generated code
+# nodeoption 0 ALLOCATE 1 # not really necessary and have to change the code
+# add normalization layer
+imageformat input_1 bw8 offset_int8 
+# display graph
+show
+
+############ CACHE/RAM/FLASH Settings ############
+# default: 65k but gap8 have 60k
+set l1_size 60000 
+# type of read-only memory
+set l3_ram_device $(MODEL_L3_RAM) 
+# type of read/write memory
+set l3_flash_device $(MODEL_L3_FLASH) 
+# set graph_const_exec_from_flash false # ????
+
+############## DEBUG/INFOS OPTIONS ##############
+set graph_produce_node_names true
+set graph_produce_operinfos true
+# set graph_dump_one_node S19_Conv2d_16x16x3x3_Relu
+# set graph_dump_tensor 6
+# print trace during execution
+# set graph_trace_exec true
+save_state
