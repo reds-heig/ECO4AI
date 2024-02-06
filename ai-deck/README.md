@@ -67,7 +67,7 @@ show
 adjust
 
 fusions --scale8
-fusions -a expression_matcher #
+fusions -a expression_matcher
 
 aquant test/img/* -T -H 200 -W 200 --scheme SQ8 -D 128 -O -1
 
@@ -175,10 +175,3 @@ tensor inter_info[] = {
     { .name="ALL", .c=1,  .h=1,   .w=1,   .offset=0     }  // 8: ALL
 };
 ```
-
-
-
-## Crazyflie
-
-
-
