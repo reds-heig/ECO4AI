@@ -1,3 +1,10 @@
 .vscode/
 __pycache__/
+drone_controller/
 env/
+.ipynb_checkpoints
+.neptune*
+*.zip
+*.csv
+*.txt
+nohup.out
