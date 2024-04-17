@@ -1,6 +1,6 @@
 # ECO4AI
 
-This is the official repository for the ECO4AI project.
+This is the official repository for the ECO4AI project and the resulting paper "DroneBandit: Multi-armed contextual bandits for collaborative edge-to-cloud inference in resource-constrained nanodrones".
 
 Authors: *Guillaume Chacun*, *Mehdi Akeddar*, *Thomas Rieder*, *Bruno Da Rocha Carvalho* and *Marina Zapater*
 <br>
