@@ -1,46 +1,56 @@
 import bisect
-import ipywidgets as widgets
 import matplotlib.pyplot as plt
 from matplotlib.ticker import AutoLocator
 import numpy as np
 import pandas as pd
 from sklearn.metrics import accuracy_score
+from typing import Tuple
 
 
 class DroneBandit:
-    def __init__(self, x: list, alpha: float, beta: float = 1) -> None:
+    def __init__(self, x: list, alpha: float, beta: float, gamma: float, delta: float) -> None:
         self.X = np.array(x)
         
-        # p, number of partition points
+        # p, number of cutting points
         # d, number of context features
         p, d = self.X.shape
 
         self.alpha = alpha
         self.beta = beta
 
+        self.gamma = gamma # factor to scale the uncertainty of time
+        self.delta = delta # factor to scale the uncertainty of power cons
+
         self.A = self.beta * np.identity(d, np.float32)
-        self.B = np.zeros((d, 1), np.float32)
+        self.B = np.zeros((d, 2), np.float32)
 
     
-    def calc_d_e(self) -> list:
-        estimated_delays = []
+    def estimate(self) -> list:
+        d_serv_hat, p_serv_hat = [], []
 
         A_inv = np.linalg.inv(self.A)
         theta_t = A_inv @ self.B
         for p in range(self.X.shape[0]):
             xp = np.reshape(self.X[p], (-1,1))
             # Expected value
-            delay_prediction = theta_t.T @ xp
+            predictions = theta_t.T @ xp
             # Standard deviation
-            delay_confidence = self.alpha * np.sqrt(xp.T @ A_inv @ xp) # shape (1,1)
-            estimated_delays.append((delay_prediction - delay_confidence)[0][0])
-        return estimated_delays
+            uncertainty = self.alpha * np.sqrt(xp.T @ A_inv @ xp) # shape (1,1)
+            uncertainty = np.array([
+                uncertainty * self.gamma,
+                uncertainty * self.delta,
+            ])
+            predictions = predictions.flatten() - uncertainty.flatten()
+            d_serv_hat.append(predictions[0])
+            p_serv_hat.append(predictions[1])
+        return d_serv_hat, p_serv_hat
 
     
-    def update(self, p: int, d_e_p: float) -> None:
+    def update(self, p: int, d_server: float, p_server: float) -> None:
         xp = np.reshape(self.X[p], (-1,1))
         self.A = self.A + xp @ xp.T
-        self.B = self.B + xp * d_e_p 
+        v = np.array([d_server, p_server])
+        self.B = self.B + xp * v
 
     
     @staticmethod
@@ -50,16 +60,30 @@ class DroneBandit:
 
 
     @staticmethod
+    def solve_argmin(d_total: list, p_total: list, sigma: float) -> Tuple[list, float, float, list]:
+        min_d = np.min(d_total)
+        t = min_d * (1 + np.sign(min_d) * sigma)
+        cp_candidates = np.where(d_total <= t)[0]
+        cp_candidates_sorted = cp_candidates[p_total[cp_candidates].argsort()]
+        cutting_point = cp_candidates_sorted[0]
+        true_cp_ranking = [*cp_candidates_sorted, *(set(d_total.argsort()) - set(cp_candidates_sorted))]
+        return cutting_point, d_total[cutting_point], p_total[cutting_point], true_cp_ranking
+
+
+    @staticmethod
     def run_scenario(context_vector_fname, scenario, params):
 
         P = params['P']
-        ps = []
-        target_ps = []
-        true_rankings = []
-        system_params = {'d_e': [], 'd_f': []}
+        cutting_points = []
+        target_cutting_points = []
+        true_cp_rankings = []
+        system_params = {'d_serv': [], 'd_edge': [], 'p_serv': [], 'p_edge': []}
 
-        D_F_simulated = np.full(P, params['D_F_def_const'])
-        D_E_Pt_simulated = np.full(P-1, params['D_E_def_const'])
+        D_EDGE_SIM = np.full(P, params['D_EDGE_def_const'])
+        D_SERV_SIM = np.full(P-1, params['D_SERV_def_const'])
+        
+        P_EDGE_SIM = np.full(P, params['P_EDGE_def_const'])
+        P_SERV_SIM = np.full(P, params['P_SERV_def_const'])
         
         # context vector
         #  #conv_mac_units, #linear_mac_units, #activation_mac_units, #conv, #linear, #activation, #input_size
@@ -72,13 +96,13 @@ class DroneBandit:
         # init ANS
         inference_count = 0
         x_n = np.copy(x).astype(np.float64)
-        ucb = DroneBandit(x_n, params['ANS_ALPHA'], params['ANS_BETA'])
+        ucb = DroneBandit(x_n, params['ANS_ALPHA'], params['ANS_BETA'], params['ANS_GAMMA'], params['ANS_DELTA'])
     
         # for our proposition of improvement
         correct_pred_counter = 0
-        last_d_e_pt = None
-        last_d_e_pt_hat = None
-        T_e = 5 * 10**(params['DELAYS_MAGNITUDE']-1) # a prediction is considered good enough if (d_e_pt - d_e_pt_hat) < T_e
+        last_d_serv = None
+        last_d_serv_hat = None
+        T_e = 5 * 10**(params['DELAYS_MAGNITUDE']-1) # a prediction is considered good enough if (d_serv - d_serv_hat) < T_e
         T_c = 10 # passed this number of good predictions, the system isn't updated anymore until it is wrong again
 
         tick_id = 0
@@ -88,86 +112,100 @@ class DroneBandit:
             if tick_id in scenario.keys():
                 args = scenario[tick_id]
                 if args is None: # end of scenario
-                    return ps, target_ps, true_rankings, system_params
-                target_p_t_, params_t_ = args
+                    return cutting_points, target_cutting_points, true_cp_rankings, system_params
+                target_cp, scenario_params = args
 
                 # update system params
-                for key in params_t_.keys():
-                    if key == 'd_f':
-                        assert len(params_t_[key]) == len(D_F_simulated)
-                        for i, new_val in enumerate(params_t_[key]):
-                            D_F_simulated[i] = new_val
+                for key in scenario_params.keys():
+                    if key == 'd_edge':
+                        assert len(scenario_params[key]) == len(D_EDGE_SIM)
+                        for i, new_val in enumerate(scenario_params[key]):
+                            D_EDGE_SIM[i] = new_val
                             
-                    elif key == 'd_e':
-                        assert len(params_t_[key]) == len(D_E_Pt_simulated)
-                        for i, new_val in enumerate(params_t_[key]):
-                            D_E_Pt_simulated[i] = new_val
+                    elif key == 'd_serv':
+                        assert len(scenario_params[key]) == len(D_SERV_SIM)
+                        for i, new_val in enumerate(scenario_params[key]):
+                            D_SERV_SIM[i] = new_val
+                            
+                    elif key == 'p_edge':
+                        for i, new_val in enumerate(scenario_params[key]):
+                            P_EDGE_SIM[i] = new_val
+                            
+                    elif key == 'p_serv':
+                        for i, new_val in enumerate(scenario_params[key]):
+                            P_SERV_SIM[i] = new_val
             else:
-                target_p_t_ = scenario[DroneBandit.find_nearest_lower_value_(list(scenario.keys()), tick_id)][0]
+                target_cp = scenario[DroneBandit.find_nearest_lower_value_(list(scenario.keys()), tick_id)][0]
             
-            if target_p_t_ is None: # end of scenario
-                return ps, target_ps, true_rankings, system_params
+            if target_cp is None: # end of scenario
+                return cutting_points, target_cutting_points, true_cp_rankings, system_params
 
             
-            # Estimate back inference time
-            d_e_hat = ucb.calc_d_e()
+            # Estimate back inference time & back power cons
+            d_serv_hat, p_serv_hat = ucb.estimate()
             
             # Estimate total inference time
-            d_f = [val for val in D_F_simulated]
-            d_hat = np.asarray(d_f) + np.asarray(d_e_hat)
+            d_edge = [val for val in D_EDGE_SIM]
+            p_edge = [val for val in P_EDGE_SIM]
+            d_total_hat = np.asarray(d_edge) + np.asarray(d_serv_hat)
+            p_total_hat = np.asarray(p_edge) + np.asarray(p_serv_hat)
+
+            # Choose cutting point for min estimated total time & min power cons
+            cp = DroneBandit.solve_argmin(d_total_hat, p_total_hat, params['ANS_SIGMA'])[0]
             
-            # Choose partition p point for min estimated total time
-            d_p_estimation_argsort = np.argsort(d_hat)
-            p_t_ = d_p_estimation_argsort[0]
-            d_p_hat = np.min(d_hat)
-            
-            # Every 1/4 times, randomize decision for p if selected partition point is set to NO partial inference
-            if p_t_ == P-1 and inference_count % params['RDM_P_TRIGGER'] == 0:
-                p_t_ = d_p_estimation_argsort[np.random.randint(1,P-1)]
+            # Every few iteration, randomize decision for p if selected cutting point is set to NO partial inference
+            if cp == P-1 and inference_count % params['RDM_P_TRIGGER'] == 0:
+                cp = np.random.randint(1, P-1)
                 
             # Run inference
-            if p_t_ == P-1:
+            if cp == P-1:
                 # Full edge, we do not update UCB
-                d_f[p_t_] = D_F_simulated[p_t_] # Measured front inference time
+                d_edge[cp] = D_EDGE_SIM[cp] # Measured front inference time
+                p_edge[cp] = P_EDGE_SIM[cp] # Measured front power cons
             else:
-                d_f[p_t_] = D_F_simulated[p_t_] # Measured front inference time
-                d_e_pt = D_E_Pt_simulated[p_t_] # Measured back inference time
-        
+                d_edge[cp] = D_EDGE_SIM[cp] # Measured front inference time
+                p_edge[cp] = P_EDGE_SIM[cp] # Measured front power cons
+                d_serv = D_SERV_SIM[cp] # Measured back inference time
+                p_serv = P_SERV_SIM[cp] # Measured back inference time
+
                 # keep count of the number of times the estimation was "close enough" to the measured value
-                if last_d_e_pt is not None and last_d_e_pt_hat is not None and abs(last_d_e_pt - last_d_e_pt_hat) < T_e:
+                if last_d_serv is not None and last_d_serv_hat is not None and abs(last_d_serv - last_d_serv_hat) < T_e:
                     correct_pred_counter += 1
                 else:
                     correct_pred_counter = 0
                     
-                last_d_e_pt = d_e_pt
-                last_d_e_pt_hat = d_e_hat[p_t_]
+                last_d_serv = d_serv
+                last_d_serv_hat = d_serv_hat[cp]
         
                 # only update the system if it made multiple mistakes in a row
                 if not params['USE_BETTER_ANS'] or correct_pred_counter < T_c:
-                    ucb.update(p_t_, d_e_pt)
+                    ucb.update(cp, d_serv, p_serv)
             inference_count += 1
             
             # just for simulation:
             # compute "true ranking"
-            d_ = [sum(x) for x in zip(D_F_simulated, D_E_Pt_simulated)] + [D_F_simulated[-1]]
-            true_ranking = np.argsort(d_)
+            d_total = np.array([sum(x) for x in zip(D_EDGE_SIM, D_SERV_SIM)] + [D_EDGE_SIM[-1]])
+            p_total = np.array([sum(x) for x in zip(P_EDGE_SIM, P_SERV_SIM)])
+            true_ranking = DroneBandit.solve_argmin(d_total, p_total, params['ANS_SIGMA'])[3]
 
             # save iteration results
-            ps.append(p_t_)
-            target_ps.append(target_p_t_)
-            true_rankings.append(true_ranking)
-            system_params['d_f'].append(D_F_simulated)
-            system_params['d_e'].append(D_E_Pt_simulated)
+            cutting_points.append(cp)
+            target_cutting_points.append(target_cp)
+            true_cp_rankings.append(true_ranking)
+            system_params['d_edge'].append(D_EDGE_SIM)
+            system_params['d_serv'].append(D_SERV_SIM)
+            system_params['p_edge'].append(P_EDGE_SIM)
+            system_params['p_serv'].append(P_SERV_SIM)
             
             tick_id += 1
 
     @staticmethod
-    def plot_scenario(ps, target_ps, true_rankings, P, linewidth):
+    def plot_scenario(cutting_points, target_cutting_points, true_cp_rankings, P, linewidth):
         fig, ax = plt.subplots(constrained_layout=True, figsize=(10, 3.5))
         line, = ax.plot([], [], lw=linewidth, color='red', label='Prediction', alpha=1., marker='', linestyle='-')
         line_target, = ax.plot([], [], lw=linewidth, label='Optimal', alpha=1, marker='', linestyle='--')
     
-        fig.suptitle('Simulated partition point selection')
+        fig.suptitle('Simulated cutting point selection')
         fig.canvas.toolbar_position = 'bottom'
         ax.set_xlabel('Algorithm step')
         ax.set_ylabel('Cutting point')
@@ -185,9 +223,9 @@ class DroneBandit:
         ax.legend(bbox_to_anchor=(.44, .01), loc='lower center', borderaxespad=0, fontsize=18) # bbox_to_anchor=(.42, .01), 
         plt.rcParams.update({'font.size': 22})
         
-        x_axis_ticks = list(range(len(ps)))
-        line.set_data(x_axis_ticks, ps)
-        line_target.set_data(x_axis_ticks, target_ps)
+        x_axis_ticks = list(range(len(cutting_points)))
+        line.set_data(x_axis_ticks, cutting_points)
+        line_target.set_data(x_axis_ticks, target_cutting_points)
         line_target.set_linewidth(linewidth)
         fig.canvas.draw()
         ax.set_xlim([x_axis_ticks[0], x_axis_ticks[-1] if len(x_axis_ticks) > 1 else x_axis_ticks[0]+1])
@@ -196,7 +234,7 @@ class DroneBandit:
 
 
     @staticmethod
-    def compute_metrics(P, p_true, p_pred, true_rankings):
+    def compute_metrics(P, target_cutting_points, cutting_points, true_cp_rankings):
         """
         Accuracy: [0,1], 1 is best
             Normalized number of correct predictions of p
@@ -213,12 +251,12 @@ class DroneBandit:
             1/N * [ pred in true_ranking[:3] ]
         """
     
-        N = len(p_true)
+        N = len(target_cutting_points)
     
         dumb_weighted_acc = 0
         smart_weighted_acc = 0
         smart_acc = 0
-        for pt, pp, true_ranking in zip(p_true, p_pred, true_rankings):
+        for pt, pp, true_ranking in zip(target_cutting_points, cutting_points, true_cp_rankings):
             
             dumb_weighted_acc += (1 - (pt == pp)) * abs(pt - pp) / (P - 1)
     
@@ -237,7 +275,7 @@ class DroneBandit:
         metrics = {}
     
         # accuracy
-        metrics['Accuracy'] = accuracy_score(p_true, p_pred)
+        metrics['Accuracy'] = accuracy_score(target_cutting_points, cutting_points)
     
         # "dumb" weighted accuracy
         metrics['Dumb Weighted Accuracy'] = dumb_weighted_acc
